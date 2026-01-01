@@ -1,5 +1,5 @@
 flask
+gunicorn
 razorpay
 python-dotenv
 PyPDF2
-gunicorn
