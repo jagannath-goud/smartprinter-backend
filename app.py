@@ -1,8 +1,7 @@
-from flask import Flask, request, jsonify
-import os
-import razorpay
-
+from flask import Flask, request, jsonify,render_template
+from flask_core import CORS 
 app = Flask(__name__)
+CORS(app)
 
 # Razorpay client
 razorpay_client = razorpay.Client(auth=(
@@ -14,6 +13,10 @@ razorpay_client = razorpay.Client(auth=(
 @app.route("/")
 def home():
     return "SmartPrinter Backend Running"
+
+@app.route("/")
+def home():
+    return render_template("pay.html")
 
 # Page count test API (TEMP)
 @app.route("/get-pages", methods=["GET"])
@@ -35,8 +38,8 @@ def create_order():
     })
 
     return jsonify({
-        "order_id": order["id"],
-        "key_id": os.environ.get("RAZORPAY_KEY_ID")
+      "key_id": RAZORPAY_KEY_ID,
+    "order_id" : order["id"]
     })
 
 # Verify payment
