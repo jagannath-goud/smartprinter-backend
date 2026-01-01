@@ -1,14 +1,12 @@
 from flask import Flask, request, jsonify
+import os
 import razorpay
-import os, uuid
-from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+from PyPDF2 import PdfReader
 
 load_dotenv()
-app = Flask(__name__)
 
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+app = Flask(__name__)
 
 razorpay_client = razorpay.Client(auth=(
     os.getenv("RAZORPAY_KEY_ID"),
@@ -19,36 +17,17 @@ razorpay_client = razorpay.Client(auth=(
 def home():
     return "SmartPrinter Backend Running"
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    if "file" not in request.files:
-        return jsonify({"error": "file missing"}), 400
-
-    job_id = str(uuid.uuid4())
-    path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
-    request.files["file"].save(path)
-
-    return jsonify({"job_id": job_id})
-
-@app.route("/get-pages", methods=["POST"])
-def get_pages():
-    job_id = request.json.get("job_id")
-    path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
-
-    if not os.path.exists(path):
-        return jsonify({"error": "file not found"}), 404
-
-    reader = PdfReader(path)
-    return jsonify({"total_pages": len(reader.pages)})
-
 @app.route("/create-order", methods=["POST"])
 def create_order():
-    amount = int(request.json["amount"]) * 100
+    data = request.json
+    amount = int(data["amount"]) * 100
+
     order = razorpay_client.order.create({
         "amount": amount,
         "currency": "INR",
         "payment_capture": 1
     })
+
     return jsonify({
         "order_id": order["id"],
         "key_id": os.getenv("RAZORPAY_KEY_ID")
@@ -65,4 +44,4 @@ def verify_payment():
     return jsonify({"status": "verified"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
