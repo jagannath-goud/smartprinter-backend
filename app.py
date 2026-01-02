@@ -1,8 +1,8 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import razorpay
 from dotenv import load_dotenv
-import os, time, uuid
+import os, uuid
 from PyPDF2 import PdfReader
 from queue import Queue
 
@@ -34,7 +34,7 @@ job_status = {}
 def home():
     return "SmartPrinter API running ✅"
 
-# ================= UPLOAD =================
+# ================= UPLOAD PDF =================
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
     if "file" not in request.files:
@@ -47,7 +47,7 @@ def upload_pdf():
     job_status[job_id] = "UPLOADED"
     return jsonify({"job_id": job_id})
 
-# ================= GET PAGES =================
+# ================= GET PAGE COUNT =================
 @app.route("/get-pages", methods=["POST"])
 def get_pages():
     job_id = request.json.get("job_id")
@@ -56,7 +56,7 @@ def get_pages():
     reader = PdfReader(pdf_path)
     return jsonify({"total_pages": len(reader.pages)})
 
-# ================= CREATE ORDER =================
+# ================= CREATE RAZORPAY ORDER =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
     amount = int(request.json["amount"]) * 100
@@ -76,10 +76,22 @@ def create_order():
 @app.route("/verify-payment", methods=["POST"])
 def verify_payment():
     data = request.json
-    razorpay_client.utility.verify_payment_signature(data)
+    razorpay_client.utility.verify_payment_signature({
+        "razorpay_order_id": data["order_id"],
+        "razorpay_payment_id": data["payment_id"],
+        "razorpay_signature": data["signature"]
+    })
     return jsonify({"status": "verified"})
 
-# ================= SEND TO PRINT QUEUE =================
+# ================= DOWNLOAD PDF (IMPORTANT) =================
+@app.route("/download/<job_id>")
+def download_pdf(job_id):
+    pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+    if not os.path.exists(pdf_path):
+        return jsonify({"error": "file not found"}), 404
+    return send_file(pdf_path, as_attachment=True)
+
+# ================= SEND PRINT JOB =================
 @app.route("/print", methods=["POST"])
 def print_pdf():
     data = request.json
@@ -87,7 +99,7 @@ def print_pdf():
 
     print_queue.put({
         "job_id": job_id,
-        "pdf_path": os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"),
+        "pdf_url": f"{request.host_url}download/{job_id}",
         "pages": data.get("pages", "ALL"),
         "copies": data.get("copies", 1)
     })
