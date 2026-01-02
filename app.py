@@ -1,22 +1,22 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 import razorpay
-import os, time, uuid, threading
-from queue import Queue
-from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+import os, uuid, time
+from PyPDF2 import PdfReader
 
 # ================= LOAD ENV =================
 load_dotenv()
-APP_MODE = os.getenv("APP_MODE", "TEST")
+
+APP_MODE = os.getenv("APP_MODE", "TEST")   # TEST / LIVE
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 app = Flask(__name__)
-CORS(app)  # 🔥 CRITICAL FIX
 
 # ================= RAZORPAY =================
 razorpay_client = razorpay.Client(auth=(
-    os.getenv("RAZORPAY_KEY_ID"),
-    os.getenv("RAZORPAY_KEY_SECRET")
+    RAZORPAY_KEY_ID,
+    RAZORPAY_KEY_SECRET
 ))
 
 # ================= PATHS =================
@@ -24,28 +24,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ================= QUEUE & STATE =================
-print_queue = Queue()
-job_status = {}
+# ================= IN-MEMORY STATE =================
+jobs = {}              # job_id → job info
+verified_payments = set()
 
-# ================= PRINTER WORKER (CLOUD SAFE) =================
-def printer_worker():
-    while True:
-        job = print_queue.get()
-        job_id = job["job_id"]
-        job_status[job_id] = "QUEUED_FOR_PRINT"
-        # ⛔ Cloud cannot print – only queue
-        print("PRINT JOB QUEUED:", job)
-        print_queue.task_done()
+# ================= HEALTH CHECK =================
+@app.route("/", methods=["GET"])
+def health():
+    return "SmartPrinter API running ✅"
 
-threading.Thread(target=printer_worker, daemon=True).start()
-
-# ================= HOME =================
-@app.route("/")
-def home():
-    return "Smart Printer Backend Running ✅"
-
-# ================= UPLOAD =================
+# ================= UPLOAD PDF =================
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
     if "file" not in request.files:
@@ -55,37 +43,44 @@ def upload_pdf():
     pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     request.files["file"].save(pdf_path)
 
-    # 🔒 WAIT UNTIL FILE IS STABLE
-    for _ in range(30):
-        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1024:
+    # Ensure file is fully written
+    for _ in range(20):
+        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
             break
         time.sleep(0.1)
 
-    job_status[job_id] = "UPLOADED"
+    jobs[job_id] = {
+        "pdf": pdf_path,
+        "status": "UPLOADED",
+        "pages": 0
+    }
+
     return jsonify({"job_id": job_id}), 200
 
-# ================= GET PAGES =================
+# ================= GET PAGE COUNT =================
 @app.route("/get-pages", methods=["POST"])
 def get_pages():
-    job_id = request.json.get("job_id")
-    pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+    data = request.json
+    job_id = data.get("job_id")
 
-    if not os.path.exists(pdf_path):
-        return jsonify({"error": "file not found"}), 404
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "invalid job"}), 404
 
-    for _ in range(5):
-        try:
-            reader = PdfReader(pdf_path)
-            return jsonify({"total_pages": len(reader.pages)}), 200
-        except Exception:
-            time.sleep(0.2)
-
-    return jsonify({"error": "pdf read failed"}), 500
+    try:
+        reader = PdfReader(job["pdf"])
+        pages = len(reader.pages)
+        job["pages"] = pages
+        return jsonify({"total_pages": pages}), 200
+    except Exception as e:
+        return jsonify({"error": "pdf read failed"}), 500
 
 # ================= CREATE ORDER =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
-    amount = int(request.json["amount"]) * 100
+    amount = int(request.json.get("amount", 0)) * 100
+    if amount <= 0:
+        return jsonify({"error": "invalid amount"}), 400
 
     order = razorpay_client.order.create({
         "amount": amount,
@@ -95,47 +90,55 @@ def create_order():
 
     return jsonify({
         "order_id": order["id"],
-        "key_id": os.getenv("RAZORPAY_KEY_ID")
+        "key_id": RAZORPAY_KEY_ID
     }), 200
 
 # ================= VERIFY PAYMENT =================
 @app.route("/verify-payment", methods=["POST"])
 def verify_payment():
-    try:
-        data = request.json
+    data = request.json
 
+    try:
         razorpay_client.utility.verify_payment_signature({
             "razorpay_order_id": data["razorpay_order_id"],
             "razorpay_payment_id": data["razorpay_payment_id"],
             "razorpay_signature": data["razorpay_signature"]
         })
 
+        verified_payments.add(data["razorpay_payment_id"])
         return jsonify({"status": "verified"}), 200
 
     except Exception as e:
-        print("VERIFY ERROR:", e)
         return jsonify({"status": "failed"}), 400
 
-# ================= PRINT =================
-@app.route("/print", methods=["POST"])
-def print_pdf():
+# ================= REQUEST PRINT =================
+@app.route("/request-print", methods=["POST"])
+def request_print():
     data = request.json
-    job_id = data["job_id"]
+    job_id = data.get("job_id")
+    payment_id = data.get("payment_id")
 
-    print_queue.put({
-        "job_id": job_id,
-        "from": data["from"],
-        "to": data["to"],
-        "copies": data.get("copies", 1)
-    })
+    if payment_id not in verified_payments:
+        return jsonify({"error": "payment not verified"}), 403
 
-    job_status[job_id] = "QUEUED"
-    return jsonify({"status": "QUEUED", "job_id": job_id}), 200
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "invalid job"}), 404
+
+    job["status"] = "READY_FOR_PRINT"
+    job["from"] = data.get("from")
+    job["to"] = data.get("to")
+    job["copies"] = data.get("copies", 1)
+
+    return jsonify({"status": "queued"}), 200
 
 # ================= JOB STATUS =================
-@app.route("/job-status/<job_id>")
-def job_status_api(job_id):
-    return jsonify({"status": job_status.get(job_id, "UNKNOWN")})
+@app.route("/job-status/<job_id>", methods=["GET"])
+def job_status(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "UNKNOWN"}), 404
+    return jsonify({"status": job["status"]}), 200
 
 # ================= RUN =================
 if __name__ == "__main__":
