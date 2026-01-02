@@ -3,9 +3,8 @@ from flask_cors import CORS
 import razorpay
 from dotenv import load_dotenv
 import os, time, uuid
-from PyPDF2 import PdfReader
 from queue import Queue
-from functools import wraps
+from PyPDF2 import PdfReader
 
 # ================= LOAD ENV =================
 load_dotenv()
@@ -14,12 +13,14 @@ app = Flask(__name__)
 CORS(app)
 
 # ================= ENV =================
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 AGENT_SECRET = os.getenv("AGENT_SECRET")
 
 # ================= RAZORPAY =================
 razorpay_client = razorpay.Client(auth=(
-    os.getenv("RAZORPAY_KEY_ID"),
-    os.getenv("RAZORPAY_KEY_SECRET")
+    RAZORPAY_KEY_ID,
+    RAZORPAY_KEY_SECRET
 ))
 
 # ================= PATHS =================
@@ -27,19 +28,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ================= QUEUES & STATUS =================
-agent_job_queue = Queue()
+# ================= JOB QUEUE =================
+print_queue = Queue()
 job_status = {}
-
-# ================= AGENT AUTH =================
-def agent_auth_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        if auth != f"Bearer {AGENT_SECRET}":
-            return jsonify({"error": "Unauthorized agent"}), 401
-        return f(*args, **kwargs)
-    return decorated
 
 # ================= HOME =================
 @app.route("/")
@@ -56,9 +47,13 @@ def upload_pdf():
     pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     request.files["file"].save(pdf_path)
 
-    time.sleep(0.2)
-    job_status[job_id] = "UPLOADED"
+    # wait until file fully written
+    for _ in range(10):
+        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+            break
+        time.sleep(0.1)
 
+    job_status[job_id] = "UPLOADED"
     return jsonify({"job_id": job_id})
 
 # ================= GET PAGES =================
@@ -83,59 +78,78 @@ def create_order():
 
     return jsonify({
         "order_id": order["id"],
-        "key_id": os.getenv("RAZORPAY_KEY_ID")
+        "key_id": RAZORPAY_KEY_ID
     })
 
 # ================= VERIFY PAYMENT =================
 @app.route("/verify-payment", methods=["POST"])
 def verify_payment():
-    data = request.json
-    razorpay_client.utility.verify_payment_signature(data)
-    return jsonify({"status": "verified"})
+    try:
+        razorpay_client.utility.verify_payment_signature(request.json)
+        return jsonify({"status": "verified"})
+    except Exception as e:
+        return jsonify({"status": "failed", "error": str(e)}), 400
 
-# ================= CREATE PRINT JOB =================
+# ================= PRINT =================
 @app.route("/print", methods=["POST"])
-def print_job():
+def print_pdf():
     data = request.json
     job_id = data["job_id"]
 
-    job = {
+    print_queue.put({
         "job_id": job_id,
-        "pdf_url": f"{request.host_url}uploads/{job_id}.pdf",
         "from": data["from"],
         "to": data["to"],
         "copies": data.get("copies", 1)
-    }
+    })
 
-    agent_job_queue.put(job)
     job_status[job_id] = "QUEUED"
-
     return jsonify({"status": "QUEUED", "job_id": job_id})
-
-# ================= AGENT PULL JOB =================
-@app.route("/agent/pull-job", methods=["GET"])
-@agent_auth_required
-def agent_pull_job():
-    if agent_job_queue.empty():
-        return jsonify({"status": "NO_JOB"})
-
-    job = agent_job_queue.get()
-    job_status[job["job_id"]] = "ASSIGNED"
-    return jsonify(job)
-
-# ================= AGENT JOB DONE =================
-@app.route("/agent/job-done", methods=["POST"])
-@agent_auth_required
-def agent_job_done():
-    job_id = request.json.get("job_id")
-    job_status[job_id] = "COMPLETED"
-    return jsonify({"status": "DONE"})
 
 # ================= JOB STATUS =================
 @app.route("/job-status/<job_id>")
-def get_job_status(job_id):
+def job_status_api(job_id):
     return jsonify({"status": job_status.get(job_id, "UNKNOWN")})
+
+# ================= AGENT AUTH =================
+def agent_auth(req):
+    token = req.headers.get("Authorization", "").replace("Bearer ", "")
+    return token == AGENT_SECRET
+
+# ================= AGENT PULL JOB =================
+@app.route("/agent/pull-job", methods=["GET"])
+def agent_pull_job():
+    if not agent_auth(request):
+        return jsonify({"error": "unauthorized"}), 401
+
+    if print_queue.empty():
+        return jsonify({"status": "NO_JOB"})
+
+    job = print_queue.get()
+    job_id = job["job_id"]
+
+    job_status[job_id] = "PRINTING"
+
+    return jsonify({
+        "job_id": job_id,
+        "pdf_url": f"/uploads/{job_id}.pdf",
+        "from": job["from"],
+        "to": job["to"],
+        "copies": job["copies"]
+    })
+
+# ================= AGENT JOB DONE =================
+@app.route("/agent/job-done", methods=["POST"])
+def agent_job_done():
+    if not agent_auth(request):
+        return jsonify({"error": "unauthorized"}), 401
+
+    job_id = request.json.get("job_id")
+    job_status[job_id] = "COMPLETED"
+
+    return jsonify({"status": "DONE"})
 
 # ================= RUN =================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
