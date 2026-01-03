@@ -8,7 +8,6 @@ from queue import Queue
 
 # ================= LOAD ENV =================
 load_dotenv()
-
 AGENT_SECRET = os.getenv("AGENT_SECRET")
 
 app = Flask(__name__)
@@ -56,12 +55,11 @@ def get_pages():
     if not os.path.exists(pdf_path):
         return jsonify({"error": "file not found"}), 404
 
-    # 🔒 retry-safe read
     for _ in range(5):
         try:
             reader = PdfReader(pdf_path)
             return jsonify({"total_pages": len(reader.pages)}), 200
-        except Exception:
+        except:
             time.sleep(0.2)
 
     return jsonify({"error": "unable to read pdf"}), 500
@@ -86,21 +84,16 @@ def create_order():
 @app.route("/verify-payment", methods=["POST"])
 def verify_payment():
     try:
-        data = request.json
-
         razorpay_client.utility.verify_payment_signature({
-            "razorpay_order_id": data["order_id"],
-            "razorpay_payment_id": data["payment_id"],
-            "razorpay_signature": data["signature"]
+            "razorpay_order_id": request.json["order_id"],
+            "razorpay_payment_id": request.json["payment_id"],
+            "razorpay_signature": request.json["signature"]
         })
-
         return jsonify({"status": "verified"}), 200
-
-    except Exception as e:
-        print("Verify error:", e)
+    except:
         return jsonify({"status": "failed"}), 400
 
-# ================= SEND TO PRINT QUEUE =================
+# ================= PRINT =================
 @app.route("/print", methods=["POST"])
 def print_pdf():
     data = request.json
@@ -108,18 +101,19 @@ def print_pdf():
 
     print_queue.put({
         "job_id": job_id,
+        "from": data.get("from", 1),
+        "to": data.get("to"),
         "copies": data.get("copies", 1)
     })
 
     job_status[job_id] = "QUEUED"
-    return jsonify({"status": "QUEUED", "job_id": job_id}), 200
+    return jsonify({"status": "QUEUED"}), 200
 
 # ================= AGENT AUTH =================
 def agent_auth():
-    auth = request.headers.get("Authorization", "")
-    return auth == f"Bearer {AGENT_SECRET}"
+    return request.headers.get("Authorization") == f"Bearer {AGENT_SECRET}"
 
-# ================= AGENT PULL JOB =================
+# ================= AGENT PULL =================
 @app.route("/agent/pull-job", methods=["GET"])
 def agent_pull_job():
     if not agent_auth():
@@ -131,49 +125,31 @@ def agent_pull_job():
     job = print_queue.get()
     job_status[job["job_id"]] = "PRINTING"
 
-    return jsonify({
-        "job_id": job["job_id"],
-        "copies": job["copies"]
-    }), 200
+    return jsonify(job), 200
 
-# ================= AGENT DOWNLOAD PDF =================
+# ================= DOWNLOAD =================
 @app.route("/agent/download/<job_id>")
 def agent_download(job_id):
     if not agent_auth():
         return jsonify({"error": "unauthorized"}), 401
 
     pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
-    if not os.path.exists(pdf_path):
-        return jsonify({"error": "file not found"}), 404
-
     return send_file(pdf_path, as_attachment=True)
 
-# ================= AGENT JOB DONE (AUTO CLEANUP) =================
+# ================= DONE =================
 @app.route("/agent/job-done", methods=["POST"])
 def agent_job_done():
     if not agent_auth():
         return jsonify({"error": "unauthorized"}), 401
 
-    job_id = request.json.get("job_id")
+    job_id = request.json["job_id"]
     pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
 
-    # 🔥 AUTO DELETE PDF
-    try:
-        if os.path.exists(pdf_path):
-            os.remove(pdf_path)
-    except Exception as e:
-        print("Cleanup error:", e)
+    if os.path.exists(pdf_path):
+        os.remove(pdf_path)
 
     job_status[job_id] = "DONE"
     return jsonify({"status": "DONE"}), 200
-
-# ================= JOB STATUS =================
-@app.route("/job-status/<job_id>")
-def get_job_status(job_id):
-    return jsonify({
-        "job_id": job_id,
-        "status": job_status.get(job_id, "UNKNOWN")
-    }), 200
 
 # ================= RUN =================
 if __name__ == "__main__":
