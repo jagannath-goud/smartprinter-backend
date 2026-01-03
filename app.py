@@ -3,7 +3,7 @@ from flask_cors import CORS
 import razorpay
 from dotenv import load_dotenv
 import os, uuid, time
-from PyPDF2 import PdfReader
+from PyPDF2 import PdfReader, PdfWriter
 from queue import Queue
 
 # ================= LOAD ENV =================
@@ -97,18 +97,36 @@ def verify_payment():
 @app.route("/print", methods=["POST"])
 def print_pdf():
     data = request.json
+
     job_id = data["job_id"]
+    from_page = int(data.get("from", 1))
+    to_page = int(data.get("to", 0))
+    copies = int(data.get("copies", 1))
+
+    original_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+    sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
+
+    reader = PdfReader(original_pdf)
+
+    if to_page == 0 or to_page > len(reader.pages):
+        to_page = len(reader.pages)
+
+    writer = PdfWriter()
+
+    for i in range(from_page - 1, to_page):
+        writer.add_page(reader.pages[i])
+
+    with open(sliced_pdf, "wb") as f:
+        writer.write(f)
 
     print_queue.put({
         "job_id": job_id,
-        "from": data.get("from", 1),
-        "to": data.get("to"),
-        "copies": data.get("copies", 1)
+        "copies": copies
     })
 
     job_status[job_id] = "QUEUED"
-    return jsonify({"status": "QUEUED"}), 200
 
+    return jsonify({"status": "QUEUED", "job_id": job_id}), 200
 # ================= AGENT AUTH =================
 def agent_auth():
     return request.headers.get("Authorization") == f"Bearer {AGENT_SECRET}"
@@ -133,24 +151,27 @@ def agent_download(job_id):
     if not agent_auth():
         return jsonify({"error": "unauthorized"}), 401
 
-    pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
-    return send_file(pdf_path, as_attachment=True)
+    sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
 
+    if not os.path.exists(sliced_pdf):
+        return jsonify({"error": "file not found"}), 404
+
+    return send_file(sliced_pdf, as_attachment=True)
 # ================= DONE =================
 @app.route("/agent/job-done", methods=["POST"])
 def agent_job_done():
     if not agent_auth():
         return jsonify({"error": "unauthorized"}), 401
 
-    job_id = request.json["job_id"]
-    pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+    job_id = request.json.get("job_id")
 
-    if os.path.exists(pdf_path):
-        os.remove(pdf_path)
+    for suffix in [".pdf", "_print.pdf"]:
+        path = os.path.join(UPLOAD_FOLDER, f"{job_id}{suffix}")
+        if os.path.exists(path):
+            os.remove(path)
 
     job_status[job_id] = "DONE"
     return jsonify({"status": "DONE"}), 200
-
 # ================= RUN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
