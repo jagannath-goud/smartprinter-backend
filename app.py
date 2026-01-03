@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import razorpay
 from dotenv import load_dotenv
@@ -34,7 +34,7 @@ job_status = {}
 def home():
     return "SmartPrinter API running ✅"
 
-# ================= UPLOAD PDF =================
+# ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
     if "file" not in request.files:
@@ -47,16 +47,19 @@ def upload_pdf():
     job_status[job_id] = "UPLOADED"
     return jsonify({"job_id": job_id})
 
-# ================= GET PAGE COUNT =================
+# ================= GET PAGES =================
 @app.route("/get-pages", methods=["POST"])
 def get_pages():
     job_id = request.json.get("job_id")
     pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
 
+    if not os.path.exists(pdf_path):
+        return jsonify({"error": "file not found"}), 404
+
     reader = PdfReader(pdf_path)
     return jsonify({"total_pages": len(reader.pages)})
 
-# ================= CREATE RAZORPAY ORDER =================
+# ================= CREATE ORDER =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
     amount = int(request.json["amount"]) * 100
@@ -76,22 +79,10 @@ def create_order():
 @app.route("/verify-payment", methods=["POST"])
 def verify_payment():
     data = request.json
-    razorpay_client.utility.verify_payment_signature({
-        "razorpay_order_id": data["order_id"],
-        "razorpay_payment_id": data["payment_id"],
-        "razorpay_signature": data["signature"]
-    })
+    razorpay_client.utility.verify_payment_signature(data)
     return jsonify({"status": "verified"})
 
-# ================= DOWNLOAD PDF (IMPORTANT) =================
-@app.route("/download/<job_id>")
-def download_pdf(job_id):
-    pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
-    if not os.path.exists(pdf_path):
-        return jsonify({"error": "file not found"}), 404
-    return send_file(pdf_path, as_attachment=True)
-
-# ================= SEND PRINT JOB =================
+# ================= SEND TO PRINT QUEUE =================
 @app.route("/print", methods=["POST"])
 def print_pdf():
     data = request.json
@@ -99,7 +90,7 @@ def print_pdf():
 
     print_queue.put({
         "job_id": job_id,
-        "pdf_url": f"{request.host_url}download/{job_id}",
+        "pdf_path": os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"),
         "pages": data.get("pages", "ALL"),
         "copies": data.get("copies", 1)
     })
@@ -125,13 +116,22 @@ def agent_pull_job():
     job_status[job["job_id"]] = "PRINTING"
     return jsonify(job)
 
-# ================= AGENT JOB DONE =================
+# ================= AGENT JOB DONE (AUTO CLEANUP) =================
 @app.route("/agent/job-done", methods=["POST"])
 def agent_job_done():
     if not agent_auth():
         return jsonify({"error": "unauthorized"}), 401
 
     job_id = request.json.get("job_id")
+    pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+
+    # 🔥 AUTO DELETE PDF
+    try:
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+    except Exception as e:
+        print("Cleanup error:", e)
+
     job_status[job_id] = "DONE"
     return jsonify({"status": "DONE"})
 
