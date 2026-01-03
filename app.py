@@ -1,8 +1,8 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import razorpay
 from dotenv import load_dotenv
-import os, uuid
+import os, uuid, time
 from PyPDF2 import PdfReader
 from queue import Queue
 
@@ -45,7 +45,7 @@ def upload_pdf():
     request.files["file"].save(pdf_path)
 
     job_status[job_id] = "UPLOADED"
-    return jsonify({"job_id": job_id})
+    return jsonify({"job_id": job_id}), 200
 
 # ================= GET PAGES =================
 @app.route("/get-pages", methods=["POST"])
@@ -56,8 +56,15 @@ def get_pages():
     if not os.path.exists(pdf_path):
         return jsonify({"error": "file not found"}), 404
 
-    reader = PdfReader(pdf_path)
-    return jsonify({"total_pages": len(reader.pages)})
+    # 🔒 retry-safe read
+    for _ in range(5):
+        try:
+            reader = PdfReader(pdf_path)
+            return jsonify({"total_pages": len(reader.pages)}), 200
+        except Exception:
+            time.sleep(0.2)
+
+    return jsonify({"error": "unable to read pdf"}), 500
 
 # ================= CREATE ORDER =================
 @app.route("/create-order", methods=["POST"])
@@ -73,14 +80,25 @@ def create_order():
     return jsonify({
         "order_id": order["id"],
         "key_id": os.getenv("RAZORPAY_KEY_ID")
-    })
+    }), 200
 
 # ================= VERIFY PAYMENT =================
 @app.route("/verify-payment", methods=["POST"])
 def verify_payment():
-    data = request.json
-    razorpay_client.utility.verify_payment_signature(data)
-    return jsonify({"status": "verified"})
+    try:
+        data = request.json
+
+        razorpay_client.utility.verify_payment_signature({
+            "razorpay_order_id": data["order_id"],
+            "razorpay_payment_id": data["payment_id"],
+            "razorpay_signature": data["signature"]
+        })
+
+        return jsonify({"status": "verified"}), 200
+
+    except Exception as e:
+        print("Verify error:", e)
+        return jsonify({"status": "failed"}), 400
 
 # ================= SEND TO PRINT QUEUE =================
 @app.route("/print", methods=["POST"])
@@ -90,13 +108,11 @@ def print_pdf():
 
     print_queue.put({
         "job_id": job_id,
-        "pdf_path": os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"),
-        "pages": data.get("pages", "ALL"),
         "copies": data.get("copies", 1)
     })
 
     job_status[job_id] = "QUEUED"
-    return jsonify({"status": "QUEUED", "job_id": job_id})
+    return jsonify({"status": "QUEUED", "job_id": job_id}), 200
 
 # ================= AGENT AUTH =================
 def agent_auth():
@@ -110,11 +126,27 @@ def agent_pull_job():
         return jsonify({"error": "unauthorized"}), 401
 
     if print_queue.empty():
-        return jsonify({"status": "NO_JOB"})
+        return jsonify({"status": "NO_JOB"}), 200
 
     job = print_queue.get()
     job_status[job["job_id"]] = "PRINTING"
-    return jsonify(job)
+
+    return jsonify({
+        "job_id": job["job_id"],
+        "copies": job["copies"]
+    }), 200
+
+# ================= AGENT DOWNLOAD PDF =================
+@app.route("/agent/download/<job_id>")
+def agent_download(job_id):
+    if not agent_auth():
+        return jsonify({"error": "unauthorized"}), 401
+
+    pdf_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+    if not os.path.exists(pdf_path):
+        return jsonify({"error": "file not found"}), 404
+
+    return send_file(pdf_path, as_attachment=True)
 
 # ================= AGENT JOB DONE (AUTO CLEANUP) =================
 @app.route("/agent/job-done", methods=["POST"])
@@ -133,7 +165,7 @@ def agent_job_done():
         print("Cleanup error:", e)
 
     job_status[job_id] = "DONE"
-    return jsonify({"status": "DONE"})
+    return jsonify({"status": "DONE"}), 200
 
 # ================= JOB STATUS =================
 @app.route("/job-status/<job_id>")
@@ -141,7 +173,7 @@ def get_job_status(job_id):
     return jsonify({
         "job_id": job_id,
         "status": job_status.get(job_id, "UNKNOWN")
-    })
+    }), 200
 
 # ================= RUN =================
 if __name__ == "__main__":
