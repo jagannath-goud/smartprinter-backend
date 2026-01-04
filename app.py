@@ -102,7 +102,7 @@ def print_pdf():
     from_page = int(data.get("from", 1))
     to_page = int(data.get("to", 0))
     copies = int(data.get("copies", 1))
-    print_mode = data.get("print_mode", "BW")  # 🔥 NEW
+    mode = data.get("mode", "BW")
 
     original_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
@@ -119,11 +119,13 @@ def print_pdf():
     with open(sliced_pdf, "wb") as f:
         writer.write(f)
 
-    print_queue.put({
-        "job_id": job_id,
-        "copies": copies,
-        "print_mode": print_mode  # 🔥 STORED
-    })
+ print_queue.put({
+    "job_id": job_id,
+    "from": from_page,
+    "to": to_page,
+    "copies": copies,
+    "mode": mode
+})
 
     job_status[job_id] = "QUEUED"
     return jsonify({"status": "QUEUED", "job_id": job_id}), 200
