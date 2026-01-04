@@ -102,13 +102,12 @@ def print_pdf():
     from_page = int(data.get("from", 1))
     to_page = int(data.get("to", 0))
     copies = int(data.get("copies", 1))
-    mode = data.get("mode", "BW")   # 🔥 BW or COLOR
+    mode = data.get("mode", "BW")  # BW or COLOR
 
     original_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
 
     reader = PdfReader(original_pdf)
-
     if to_page == 0 or to_page > len(reader.pages):
         to_page = len(reader.pages)
 
@@ -119,7 +118,6 @@ def print_pdf():
     with open(sliced_pdf, "wb") as f:
         writer.write(f)
 
-    # 🔥 QUEUE JOB (NO INDENTATION ERROR)
     print_queue.put({
         "job_id": job_id,
         "from": from_page,
@@ -130,7 +128,6 @@ def print_pdf():
 
     job_status[job_id] = "QUEUED"
     return jsonify({"status": "QUEUED", "job_id": job_id}), 200
-
 # ================= AGENT AUTH =================
 def agent_auth():
     return request.headers.get("Authorization") == f"Bearer {AGENT_SECRET}"
