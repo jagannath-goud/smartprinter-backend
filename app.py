@@ -31,7 +31,7 @@ job_status = {}
 # ================= HOME =================
 @app.route("/")
 def home():
-    return "SmartPrinter API running ✅"
+    return "SmartPrinter API running (BW ONLY) ✅"
 
 # ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
@@ -93,7 +93,7 @@ def verify_payment():
     except:
         return jsonify({"status": "failed"}), 400
 
-# ================= PRINT =================
+# ================= PRINT (BW ONLY) =================
 @app.route("/print", methods=["POST"])
 def print_pdf():
     data = request.json
@@ -102,7 +102,9 @@ def print_pdf():
     from_page = int(data.get("from", 1))
     to_page = int(data.get("to", 0))
     copies = int(data.get("copies", 1))
-    mode = data.get("mode", "BW")  # BW or COLOR
+
+    # 🔒 FORCE BLACK & WHITE
+    mode = "BW"
 
     original_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
@@ -123,11 +125,16 @@ def print_pdf():
         "from": from_page,
         "to": to_page,
         "copies": copies,
-        "mode": mode
+        "mode": "BW"   # 🔒 HARD LOCK
     })
 
     job_status[job_id] = "QUEUED"
-    return jsonify({"status": "QUEUED", "job_id": job_id}), 200
+    return jsonify({
+        "status": "QUEUED",
+        "job_id": job_id,
+        "mode": "BW"
+    }), 200
+
 # ================= AGENT AUTH =================
 def agent_auth():
     return request.headers.get("Authorization") == f"Bearer {AGENT_SECRET}"
