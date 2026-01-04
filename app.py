@@ -102,6 +102,7 @@ def print_pdf():
     from_page = int(data.get("from", 1))
     to_page = int(data.get("to", 0))
     copies = int(data.get("copies", 1))
+    print_mode = data.get("print_mode", "BW")  # 🔥 NEW
 
     original_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
@@ -112,7 +113,6 @@ def print_pdf():
         to_page = len(reader.pages)
 
     writer = PdfWriter()
-
     for i in range(from_page - 1, to_page):
         writer.add_page(reader.pages[i])
 
@@ -121,12 +121,13 @@ def print_pdf():
 
     print_queue.put({
         "job_id": job_id,
-        "copies": copies
+        "copies": copies,
+        "print_mode": print_mode  # 🔥 STORED
     })
 
     job_status[job_id] = "QUEUED"
-
     return jsonify({"status": "QUEUED", "job_id": job_id}), 200
+
 # ================= AGENT AUTH =================
 def agent_auth():
     return request.headers.get("Authorization") == f"Bearer {AGENT_SECRET}"
@@ -143,7 +144,7 @@ def agent_pull_job():
     job = print_queue.get()
     job_status[job["job_id"]] = "PRINTING"
 
-    return jsonify(job), 200
+    return jsonify(job), 200  # 🔥 includes print_mode
 
 # ================= DOWNLOAD =================
 @app.route("/agent/download/<job_id>")
@@ -152,11 +153,11 @@ def agent_download(job_id):
         return jsonify({"error": "unauthorized"}), 401
 
     sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
-
     if not os.path.exists(sliced_pdf):
         return jsonify({"error": "file not found"}), 404
 
     return send_file(sliced_pdf, as_attachment=True)
+
 # ================= DONE =================
 @app.route("/agent/job-done", methods=["POST"])
 def agent_job_done():
@@ -172,6 +173,7 @@ def agent_job_done():
 
     job_status[job_id] = "DONE"
     return jsonify({"status": "DONE"}), 200
+
 # ================= RUN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
