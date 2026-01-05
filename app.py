@@ -28,10 +28,42 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 print_queue = Queue()
 job_status = {}
 
+# 🔥 PRINTER STATE
+last_agent_ping = 0
+AGENT_TIMEOUT = 20  # seconds
+AVG_PAGE_TIME = 3  # seconds per page (estimation)
+
 # ================= HOME =================
 @app.route("/")
 def home():
-    return "SmartPrinter API running (BW ONLY) ✅"
+    return "VPrint API running (BW ONLY) ✅"
+
+# ================= AGENT HEARTBEAT =================
+@app.route("/agent/heartbeat", methods=["POST"])
+def agent_heartbeat():
+    global last_agent_ping
+    if request.headers.get("Authorization") != f"Bearer {AGENT_SECRET}":
+        return jsonify({"error": "unauthorized"}), 401
+
+    last_agent_ping = time.time()
+    return jsonify({"status": "alive"}), 200
+
+# ================= PRINTER STATUS =================
+@app.route("/printer/status", methods=["GET"])
+def printer_status():
+    now = time.time()
+    online = (now - last_agent_ping) < AGENT_TIMEOUT
+
+    queue_size = print_queue.qsize()
+
+    est_wait = queue_size * AVG_PAGE_TIME * 5  # rough average
+
+    return jsonify({
+        "printer_online": online,
+        "printer_state": "ONLINE" if online else "OFFLINE",
+        "queue_jobs": queue_size,
+        "estimated_wait_seconds": est_wait
+    }), 200
 
 # ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
@@ -103,9 +135,6 @@ def print_pdf():
     to_page = int(data.get("to", 0))
     copies = int(data.get("copies", 1))
 
-    # 🔒 FORCE BLACK & WHITE
-    mode = "BW"
-
     original_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     sliced_pdf = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
 
@@ -125,14 +154,15 @@ def print_pdf():
         "from": from_page,
         "to": to_page,
         "copies": copies,
-        "mode": "BW"   # 🔒 HARD LOCK
+        "mode": "BW"
     })
 
     job_status[job_id] = "QUEUED"
+
     return jsonify({
         "status": "QUEUED",
         "job_id": job_id,
-        "mode": "BW"
+        "queue_position": print_queue.qsize()
     }), 200
 
 # ================= AGENT AUTH =================
@@ -150,7 +180,6 @@ def agent_pull_job():
 
     job = print_queue.get()
     job_status[job["job_id"]] = "PRINTING"
-
     return jsonify(job), 200
 
 # ================= DOWNLOAD =================
