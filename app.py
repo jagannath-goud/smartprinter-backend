@@ -25,10 +25,41 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 print_queue = Queue()
 job_status = {}
 
+# 🔥 REAL PRINTER STATE (FROM AGENT)
+printer_state = {
+    "status": "OFFLINE",
+    "printer": None,
+    "last_seen": 0
+}
+
+AVG_SECONDS_PER_JOB = 15  # ETA logic
+
 # ================= HOME =================
 @app.route("/")
 def home():
-    return "SmartPrinter API running ✅"
+    return "SmartPrinter API running (REAL MODE) ✅"
+
+# ================= PRINTER STATUS =================
+@app.route("/printer-status")
+def get_printer_status():
+    return jsonify({
+        "status": printer_state["status"],
+        "printer": printer_state["printer"],
+        "queue_length": print_queue.qsize(),
+        "eta_seconds": print_queue.qsize() * AVG_SECONDS_PER_JOB
+    })
+
+# ================= HEARTBEAT =================
+@app.route("/agent/heartbeat", methods=["POST"])
+def agent_heartbeat():
+    if request.headers.get("Authorization") != f"Bearer {AGENT_SECRET}":
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.json
+    printer_state["status"] = data["status"]
+    printer_state["printer"] = data.get("printer")
+    printer_state["last_seen"] = time.time()
+    return jsonify({"ok": True})
 
 # ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
@@ -48,14 +79,15 @@ def upload():
 @app.route("/get-pages", methods=["POST"])
 def get_pages():
     job_id = request.json["job_id"]
-    path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
-
-    reader = PdfReader(path)
+    reader = PdfReader(os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"))
     return jsonify({"total_pages": len(reader.pages)})
 
-# ================= PAYMENT =================
+# ================= CREATE ORDER (BLOCK IF OFFLINE) =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
+    if printer_state["status"] == "OFFLINE":
+        return jsonify({"error": "Printer not available"}), 409
+
     amount = int(request.json["amount"]) * 100
     order = razorpay_client.order.create({
         "amount": amount,
@@ -64,6 +96,7 @@ def create_order():
     })
     return jsonify(order)
 
+# ================= VERIFY PAYMENT =================
 @app.route("/verify-payment", methods=["POST"])
 def verify_payment():
     try:
@@ -73,8 +106,11 @@ def verify_payment():
         return jsonify({"status": "failed"}), 400
 
 # ================= PRINT =================
-@app.route("/print", methods=["POST"])
+@app.route("/print", methods methods=["POST"])
 def print_job():
+    if printer_state["status"] == "OFFLINE":
+        return jsonify({"error": "Printer offline"}), 409
+
     data = request.json
     job_id = data["job_id"]
 
@@ -99,7 +135,10 @@ def print_job():
     })
 
     job_status[job_id] = "QUEUED"
-    return jsonify({"status": "QUEUED"})
+    return jsonify({
+        "status": "QUEUED",
+        "eta_seconds": print_queue.qsize() * AVG_SECONDS_PER_JOB
+    })
 
 # ================= AGENT =================
 def agent_auth():
@@ -122,8 +161,10 @@ def download(job_id):
     if not agent_auth():
         return jsonify({"error": "unauthorized"}), 401
 
-    path = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
-    return send_file(path, as_attachment=True)
+    return send_file(
+        os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf"),
+        as_attachment=True
+    )
 
 @app.route("/agent/job-done", methods=["POST"])
 def job_done():
@@ -140,6 +181,5 @@ def job_done():
 
     return jsonify({"status": "DONE"})
 
-# ================= RUN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
