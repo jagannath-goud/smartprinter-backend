@@ -106,7 +106,7 @@ def verify_payment():
         return jsonify({"status": "failed"}), 400
 
 # ================= PRINT =================
-@app.route("/print", methods methods=["POST"])
+@app.route("/print", methods=["POST"])
 def print_job():
     if printer_state["status"] == "OFFLINE":
         return jsonify({"error": "Printer offline"}), 409
