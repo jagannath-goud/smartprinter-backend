@@ -38,6 +38,11 @@ def home():
 
 @app.route("/printer-status")
 def printer_status():
+    # ⏱ Auto mark offline if agent silent > 15 sec
+    if time.time() - printer_state["last_seen"] > 15:
+        printer_state["status"] = "OFFLINE"
+        printer_state["printer"] = None
+
     q = print_queue.qsize()
     return jsonify({
         "status": printer_state["status"],
@@ -76,13 +81,13 @@ def create_order():
     if printer_state["status"] == "OFFLINE":
         return jsonify({"error": "PRINTER_OFFLINE"}), 409
 
-    amount = int(request.json["amount"]) * 100
-    order = razorpay_client.order.create({
-        "amount": amount,
+    # 🔥 DEMO MODE (NO REAL PAYMENT)
+    return jsonify({
+        "id": "order_demo_123",
+        "amount": int(request.json["amount"]) * 100,
         "currency": "INR",
-        "payment_capture": 1
+        "key_id": os.getenv("RAZORPAY_KEY_ID", "rzp_test_demo")
     })
-    return jsonify(order)
 
 @app.route("/print", methods=["POST"])
 def print_job():
