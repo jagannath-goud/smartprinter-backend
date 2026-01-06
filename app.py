@@ -3,7 +3,6 @@ import time
 import os
 import subprocess
 import win32print
-import win32api
 
 # ================= CONFIG =================
 API_BASE = "https://api.smartprinter.in"
@@ -12,7 +11,6 @@ POLL_INTERVAL = 5
 
 SUMATRA_PATH = r"C:\print_tools\SumatraPDF.exe"
 DOWNLOAD_DIR = "downloads"
-
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 HEADERS = {
@@ -27,19 +25,13 @@ def get_real_printer_status():
         info = win32print.GetPrinter(handle, 2)
         win32print.ClosePrinter(handle)
 
+        # REAL offline flag
         if info["Attributes"] & win32print.PRINTER_ATTRIBUTE_WORK_OFFLINE:
-            return "OFFLINE", printer
-
-        if info["Status"] != 0:
-            return "OFFLINE", printer
-
-        port = info["pPortName"]
-        if not port or port.upper().startswith("FILE"):
             return "OFFLINE", printer
 
         return "ONLINE_IDLE", printer
 
-    except:
+    except Exception:
         return "OFFLINE", None
 
 
@@ -109,12 +101,15 @@ def print_pdf(pdf, from_p, to_p, copies, printer):
 
 
 def mark_done(job_id):
-    requests.post(
-        f"{API_BASE}/agent/job-done",
-        json={"job_id": job_id},
-        headers=HEADERS,
-        timeout=5
-    )
+    try:
+        requests.post(
+            f"{API_BASE}/agent/job-done",
+            json={"job_id": job_id},
+            headers=HEADERS,
+            timeout=5
+        )
+    except:
+        pass
 
 
 # ================= MAIN =================
@@ -124,10 +119,9 @@ def main():
     while True:
         status, printer = get_real_printer_status()
 
-        # 🔥 SEND HEARTBEAT ALWAYS
+        # 🔥 ALWAYS SEND HEARTBEAT
         send_heartbeat(status, printer)
-
-        print(f"💓 Heartbeat sent → {status} | {printer}")
+        print(f"💓 Heartbeat → {status} | {printer}")
 
         if status == "OFFLINE":
             time.sleep(POLL_INTERVAL)
@@ -149,7 +143,7 @@ def main():
             )
             mark_done(job["job_id"])
             os.remove(pdf)
-            print("✅ Job printed")
+            print("✅ Job printed successfully")
 
         except Exception as e:
             print("❌ Print failed:", e)
@@ -158,5 +152,4 @@ def main():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    main()
