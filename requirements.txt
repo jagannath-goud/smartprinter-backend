@@ -4,4 +4,3 @@ razorpay
 python-dotenv
 PyPDF2
 gunicorn
-requests
