@@ -1,155 +1,119 @@
-import requests
-import time
-import os
-import subprocess
-import win32print
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+import razorpay
+import os, uuid, time
+from queue import Queue
+from PyPDF2 import PdfReader, PdfWriter
+from dotenv import load_dotenv
 
-# ================= CONFIG =================
-API_BASE = "https://api.smartprinter.in"
-AGENT_SECRET = "smartprinter_agent_secret"
-POLL_INTERVAL = 5
+load_dotenv()
 
-SUMATRA_PATH = r"C:\print_tools\SumatraPDF.exe"
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+AGENT_SECRET = os.getenv("AGENT_SECRET")
 
-HEADERS = {
-    "Authorization": f"Bearer {AGENT_SECRET}"
+app = Flask(__name__)
+CORS(app)
+
+razorpay_client = razorpay.Client(auth=(
+    os.getenv("RAZORPAY_KEY_ID"),
+    os.getenv("RAZORPAY_KEY_SECRET")
+))
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+print_queue = Queue()
+
+printer_state = {
+    "status": "OFFLINE",
+    "printer": None,
+    "last_seen": 0
 }
 
-# ================= REAL PRINTER STATUS =================
-def get_real_printer_status():
-    try:
-        printer = win32print.GetDefaultPrinter()
-        handle = win32print.OpenPrinter(printer)
-        info = win32print.GetPrinter(handle, 2)
-        win32print.ClosePrinter(handle)
+AVG_SECONDS_PER_JOB = 15
 
-        # REAL offline flag
-        if info["Attributes"] & win32print.PRINTER_ATTRIBUTE_WORK_OFFLINE:
-            return "OFFLINE", printer
+@app.route("/")
+def home():
+    return "VPrint Backend Running ✅"
 
-        return "ONLINE_IDLE", printer
+@app.route("/printer-status")
+def printer_status():
+    q = print_queue.qsize()
+    return jsonify({
+        "status": printer_state["status"],
+        "printer": printer_state["printer"],
+        "queue_length": q,
+        "eta_seconds": q * AVG_SECONDS_PER_JOB
+    })
 
-    except Exception:
-        return "OFFLINE", None
+@app.route("/agent/heartbeat", methods=["POST"])
+def heartbeat():
+    if request.headers.get("Authorization") != f"Bearer {AGENT_SECRET}":
+        return jsonify({"error": "unauthorized"}), 401
 
+    data = request.json
+    printer_state["status"] = data.get("status", "OFFLINE")
+    printer_state["printer"] = data.get("printer")
+    printer_state["last_seen"] = time.time()
+    return jsonify({"ok": True})
 
-# ================= HEARTBEAT =================
-def send_heartbeat(status, printer):
-    try:
-        requests.post(
-            f"{API_BASE}/agent/heartbeat",
-            json={
-                "status": status,
-                "printer": printer
-            },
-            headers=HEADERS,
-            timeout=5
-        )
-    except:
-        pass
+@app.route("/upload", methods=["POST"])
+def upload():
+    file = request.files["file"]
+    job_id = str(uuid.uuid4())
+    path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+    file.save(path)
+    return jsonify({"job_id": job_id})
 
+@app.route("/get-pages", methods=["POST"])
+def get_pages():
+    job_id = request.json["job_id"]
+    reader = PdfReader(os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"))
+    return jsonify({"total_pages": len(reader.pages)})
 
-# ================= CLOUD =================
-def fetch_job():
-    try:
-        r = requests.get(
-            f"{API_BASE}/agent/pull-job",
-            headers=HEADERS,
-            timeout=10
-        )
-        if r.status_code == 200:
-            return r.json()
-    except:
-        pass
-    return None
+@app.route("/create-order", methods=["POST"])
+def create_order():
+    if printer_state["status"] == "OFFLINE":
+        return jsonify({"error": "PRINTER_OFFLINE"}), 409
 
+    amount = int(request.json["amount"]) * 100
+    order = razorpay_client.order.create({
+        "amount": amount,
+        "currency": "INR",
+        "payment_capture": 1
+    })
+    return jsonify(order)
 
-def download_pdf(job_id):
-    path = os.path.join(DOWNLOAD_DIR, f"{job_id}.pdf")
-    r = requests.get(
-        f"{API_BASE}/agent/download/{job_id}",
-        headers=HEADERS,
-        stream=True,
-        timeout=20
-    )
-    if r.status_code != 200:
-        raise Exception("Download failed")
+@app.route("/print", methods=["POST"])
+def print_job():
+    if printer_state["status"] == "OFFLINE":
+        return jsonify({"error": "PRINTER_OFFLINE"}), 409
 
-    with open(path, "wb") as f:
-        for chunk in r.iter_content(8192):
-            f.write(chunk)
+    data = request.json
+    job_id = data["job_id"]
 
-    return path
+    reader = PdfReader(os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"))
+    writer = PdfWriter()
 
+    for i in range(data["from"] - 1, data["to"]):
+        writer.add_page(reader.pages[i])
 
-def print_pdf(pdf, from_p, to_p, copies, printer):
-    page_range = f"{from_p}-{to_p}"
-    for _ in range(copies):
-        subprocess.run([
-            SUMATRA_PATH,
-            "-print-to",
-            printer,
-            "-silent",
-            "-exit-on-print",
-            "-print-settings",
-            page_range,
-            pdf
-        ], check=True)
-        time.sleep(3)
+    out = os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf")
+    with open(out, "wb") as f:
+        writer.write(f)
 
+    print_queue.put({
+        "job_id": job_id,
+        "from": data["from"],
+        "to": data["to"],
+        "copies": data["copies"]
+    })
 
-def mark_done(job_id):
-    try:
-        requests.post(
-            f"{API_BASE}/agent/job-done",
-            json={"job_id": job_id},
-            headers=HEADERS,
-            timeout=5
-        )
-    except:
-        pass
-
-
-# ================= MAIN =================
-def main():
-    print("🖨 VPrint Agent started (REAL STATUS MODE)")
-
-    while True:
-        status, printer = get_real_printer_status()
-
-        # 🔥 ALWAYS SEND HEARTBEAT
-        send_heartbeat(status, printer)
-        print(f"💓 Heartbeat → {status} | {printer}")
-
-        if status == "OFFLINE":
-            time.sleep(POLL_INTERVAL)
-            continue
-
-        job = fetch_job()
-        if not job or job.get("status") == "NO_JOB":
-            time.sleep(POLL_INTERVAL)
-            continue
-
-        try:
-            pdf = download_pdf(job["job_id"])
-            print_pdf(
-                pdf,
-                job["from"],
-                job["to"],
-                job["copies"],
-                printer
-            )
-            mark_done(job["job_id"])
-            os.remove(pdf)
-            print("✅ Job printed successfully")
-
-        except Exception as e:
-            print("❌ Print failed:", e)
-
-        time.sleep(2)
-
+    return jsonify({
+        "status": "QUEUED",
+        "queue_position": print_queue.qsize(),
+        "eta_seconds": print_queue.qsize() * AVG_SECONDS_PER_JOB
+    })
 
 if __name__ == "__main__":
-    main()
+    app.run()
