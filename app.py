@@ -6,22 +6,29 @@ from queue import Queue
 from PyPDF2 import PdfReader, PdfWriter
 from dotenv import load_dotenv
 
+# ================= LOAD ENV =================
 load_dotenv()
 
 AGENT_SECRET = os.getenv("AGENT_SECRET")
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
+# ================= APP =================
 app = Flask(__name__)
 CORS(app)
 
+# ================= RAZORPAY (TEST MODE) =================
 razorpay_client = razorpay.Client(auth=(
-    os.getenv("RAZORPAY_KEY_ID"),
-    os.getenv("RAZORPAY_KEY_SECRET")
+    RAZORPAY_KEY_ID,
+    RAZORPAY_KEY_SECRET
 ))
 
+# ================= PATHS =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# ================= MEMORY =================
 print_queue = Queue()
 
 printer_state = {
@@ -32,13 +39,15 @@ printer_state = {
 
 AVG_SECONDS_PER_JOB = 15
 
+# ================= HOME =================
 @app.route("/")
 def home():
-    return "VPrint Backend Running ✅"
+    return "VPrint Backend Running (TEST MODE) ✅"
 
-@app.route("/printer-status")
+# ================= PRINTER STATUS =================
+@app.route("/printer-status", methods=["GET"])
 def printer_status():
-    # ⏱ Auto mark offline if agent silent > 15 sec
+    # Auto offline if agent silent
     if time.time() - printer_state["last_seen"] > 15:
         printer_state["status"] = "OFFLINE"
         printer_state["printer"] = None
@@ -51,6 +60,7 @@ def printer_status():
         "eta_seconds": q * AVG_SECONDS_PER_JOB
     })
 
+# ================= AGENT HEARTBEAT =================
 @app.route("/agent/heartbeat", methods=["POST"])
 def heartbeat():
     if request.headers.get("Authorization") != f"Bearer {AGENT_SECRET}":
@@ -62,33 +72,49 @@ def heartbeat():
     printer_state["last_seen"] = time.time()
     return jsonify({"ok": True})
 
+# ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
 def upload():
-    file = request.files["file"]
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"error": "file missing"}), 400
+
     job_id = str(uuid.uuid4())
     path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
     file.save(path)
+
     return jsonify({"job_id": job_id})
 
+# ================= GET PAGES =================
 @app.route("/get-pages", methods=["POST"])
 def get_pages():
     job_id = request.json["job_id"]
     reader = PdfReader(os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"))
     return jsonify({"total_pages": len(reader.pages)})
 
+# ================= CREATE ORDER (REAL TEST ORDER) =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
     if printer_state["status"] == "OFFLINE":
         return jsonify({"error": "PRINTER_OFFLINE"}), 409
 
-    # 🔥 DEMO MODE (NO REAL PAYMENT)
-    return jsonify({
-        "id": "order_demo_123",
-        "amount": int(request.json["amount"]) * 100,
+    amount_rupees = int(request.json["amount"])
+    amount_paise = amount_rupees * 100
+
+    order = razorpay_client.order.create({
+        "amount": amount_paise,
         "currency": "INR",
-        "key_id": os.getenv("RAZORPAY_KEY_ID", "rzp_test_demo")
+        "payment_capture": 1
     })
 
+    return jsonify({
+        "order_id": order["id"],
+        "amount": amount_paise,
+        "currency": "INR",
+        "key_id": RAZORPAY_KEY_ID
+    })
+
+# ================= PRINT =================
 @app.route("/print", methods=["POST"])
 def print_job():
     if printer_state["status"] == "OFFLINE":
@@ -120,5 +146,6 @@ def print_job():
         "eta_seconds": print_queue.qsize() * AVG_SECONDS_PER_JOB
     })
 
+# ================= RUN =================
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=5000)
