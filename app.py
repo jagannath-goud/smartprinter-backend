@@ -82,11 +82,14 @@ def create_order():
     if printer_state["status"] == "OFFLINE":
         return jsonify({"error": "PRINTER_OFFLINE"}), 409
 
+    amount = int(request.json["amount"]) * 100
+
+    # ✅ FAKE ORDER BUT REAL FORMAT (RAZORPAY POPUP WILL OPEN)
     return jsonify({
-        "id": "order_demo",
-        "amount": int(request.json["amount"]) * 100,
+        "order_id": "order_demo_" + str(int(time.time())),
+        "amount": amount,
         "currency": "INR",
-        "key_id": os.getenv("RAZORPAY_KEY_ID", "rzp_test_demo")
+        "key_id": os.getenv("RAZORPAY_KEY_ID")  # rzp_test_xxx
     })
 
 # ================= PRINT REQUEST =================
