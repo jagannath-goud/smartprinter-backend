@@ -4,30 +4,26 @@ import os, uuid, time
 from queue import Queue
 from PyPDF2 import PdfReader, PdfWriter
 from dotenv import load_dotenv
-import razorpay   # ✅ REQUIRED
+import razorpay
 
 load_dotenv()
 
-# ================= CONFIG =================
 AGENT_SECRET = os.getenv("AGENT_SECRET", "smartprinter_agent_secret")
 
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 razorpay_client = razorpay.Client(
-    auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET"))
+    auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
 )
 
-# ================= APP =================
 app = Flask(__name__)
 CORS(app)
 
-# ================= PATHS =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ================= MEMORY =================
 print_queue = Queue()
 
 printer_state = {
@@ -38,12 +34,10 @@ printer_state = {
 
 AVG_SECONDS_PER_JOB = 15
 
-# ================= HOME =================
 @app.route("/")
 def home():
     return "✅ VPrint Backend Running"
 
-# ================= PRINTER STATUS =================
 @app.route("/printer-status")
 def printer_status():
     if time.time() - printer_state["last_seen"] > 15:
@@ -58,7 +52,6 @@ def printer_status():
         "eta_seconds": q * AVG_SECONDS_PER_JOB
     })
 
-# ================= AGENT HEARTBEAT =================
 @app.route("/agent/heartbeat", methods=["POST"])
 def heartbeat():
     if request.headers.get("Authorization") != f"Bearer {AGENT_SECRET}":
@@ -70,24 +63,25 @@ def heartbeat():
     printer_state["last_seen"] = time.time()
     return jsonify({"ok": True})
 
-# ================= UPLOAD =================
 @app.route("/upload", methods=["POST"])
 def upload():
     file = request.files["file"]
     job_id = str(uuid.uuid4())
-    file.save(os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"))
+    path = os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf")
+    file.save(path)
     return jsonify({"job_id": job_id})
 
-# ================= PAGE COUNT =================
 @app.route("/get-pages", methods=["POST"])
 def get_pages():
     job_id = request.json["job_id"]
     reader = PdfReader(os.path.join(UPLOAD_FOLDER, f"{job_id}.pdf"))
     return jsonify({"total_pages": len(reader.pages)})
 
-# ================= CREATE ORDER (REAL FIX) =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
+    if printer_state["status"] == "OFFLINE":
+        return jsonify({"error": "PRINTER_OFFLINE"}), 409
+
     amount = int(request.json["amount"]) * 100
 
     order = razorpay_client.order.create({
@@ -98,18 +92,9 @@ def create_order():
 
     return jsonify({
         "order_id": order["id"],
-        "amount": order["amount"],
-        "currency": "INR",
-        "key_id": os.getenv("RAZORPAY_KEY_ID")
-    })
-    return jsonify({
-        "order_id": order["id"],
-        "amount": order["amount"],
-        "currency": "INR",
-        "key_id": os.getenv("RAZORPAY_KEY_ID")
+        "key_id": RAZORPAY_KEY_ID
     })
 
-# ================= PRINT =================
 @app.route("/print", methods=["POST"])
 def print_job():
     if printer_state["status"] == "OFFLINE":
@@ -128,50 +113,12 @@ def print_job():
     with open(out, "wb") as f:
         writer.write(f)
 
-    print_queue.put({
-        "job_id": job_id,
-        "from": data["from"],
-        "to": data["to"],
-        "copies": data["copies"]
-    })
+    print_queue.put(data)
 
     return jsonify({
         "status": "QUEUED",
-        "queue_position": print_queue.qsize(),
         "eta_seconds": print_queue.qsize() * AVG_SECONDS_PER_JOB
     })
 
-# ================= AGENT =================
-def agent_auth():
-    return request.headers.get("Authorization") == f"Bearer {AGENT_SECRET}"
-
-@app.route("/agent/pull-job")
-def pull_job():
-    if not agent_auth():
-        return jsonify({"error": "unauthorized"}), 401
-    if print_queue.empty():
-        return jsonify({"status": "NO_JOB"})
-    return jsonify(print_queue.get())
-
-@app.route("/agent/download/<job_id>")
-def download(job_id):
-    if not agent_auth():
-        return jsonify({"error": "unauthorized"}), 401
-    return send_file(os.path.join(UPLOAD_FOLDER, f"{job_id}_print.pdf"))
-
-@app.route("/agent/job-done", methods=["POST"])
-def job_done():
-    if not agent_auth():
-        return jsonify({"error": "unauthorized"}), 401
-
-    job_id = request.json["job_id"]
-    for f in (f"{job_id}.pdf", f"{job_id}_print.pdf"):
-        p = os.path.join(UPLOAD_FOLDER, f)
-        if os.path.exists(p):
-            os.remove(p)
-
-    return jsonify({"status": "DONE"})
-
-# ================= RUN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
