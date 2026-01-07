@@ -79,18 +79,25 @@ def get_pages():
 # ================= DEMO PAYMENT =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
-    if printer_state["status"] == "OFFLINE":
-        return jsonify({"error": "PRINTER_OFFLINE"}), 409
+    data = request.json
+    amount = int(data["amount"]) * 100  # rupees → paise
 
-    amount = int(request.json["amount"]) * 100
+    try:
+        order = razorpay_client.order.create({
+            "amount": amount,
+            "currency": "INR",
+            "payment_capture": 1
+        })
 
-    # ✅ FAKE ORDER BUT REAL FORMAT (RAZORPAY POPUP WILL OPEN)
-    return jsonify({
-        "order_id": "order_demo_" + str(int(time.time())),
-        "amount": amount,
-        "currency": "INR",
-        "key_id": os.getenv("RAZORPAY_KEY_ID")  # rzp_test_xxx
-    })
+        return jsonify({
+            "id": order["id"],
+            "amount": order["amount"],
+            "currency": order["currency"],
+            "key_id": os.getenv("RAZORPAY_KEY_ID")
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ================= PRINT REQUEST =================
 @app.route("/print", methods=["POST"])
