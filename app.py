@@ -88,10 +88,7 @@ def get_pages():
 # ================= CREATE ORDER (REAL FIX) =================
 @app.route("/create-order", methods=["POST"])
 def create_order():
-    if printer_state["status"] == "OFFLINE":
-        return jsonify({"error": "PRINTER_OFFLINE"}), 409
-
-    amount = int(request.json["amount"]) * 100  # paise
+    amount = int(request.json["amount"]) * 100
 
     order = razorpay_client.order.create({
         "amount": amount,
@@ -99,6 +96,12 @@ def create_order():
         "payment_capture": 1
     })
 
+    return jsonify({
+        "order_id": order["id"],
+        "amount": order["amount"],
+        "currency": "INR",
+        "key_id": os.getenv("RAZORPAY_KEY_ID")
+    })
     return jsonify({
         "order_id": order["id"],
         "amount": order["amount"],
