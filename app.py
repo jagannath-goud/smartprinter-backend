@@ -15,7 +15,7 @@ RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 razorpay_client = razorpay.Client(
-    auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
+    auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET"))
 )
 
 # ================= APP =================
@@ -91,18 +91,19 @@ def create_order():
     if printer_state["status"] == "OFFLINE":
         return jsonify({"error": "PRINTER_OFFLINE"}), 409
 
-    amount_rupees = int(request.json["amount"])
-    amount_paise = amount_rupees * 100
+    amount = int(request.json["amount"]) * 100  # paise
 
     order = razorpay_client.order.create({
-        "amount": amount_paise,
+        "amount": amount,
         "currency": "INR",
         "payment_capture": 1
     })
 
     return jsonify({
         "order_id": order["id"],
-        "key_id": RAZORPAY_KEY_ID
+        "amount": order["amount"],
+        "currency": "INR",
+        "key_id": os.getenv("RAZORPAY_KEY_ID")
     })
 
 # ================= PRINT =================
