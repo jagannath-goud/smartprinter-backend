@@ -1,124 +1,119 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import razorpay
+import sqlite3
 import os
-from dotenv import load_dotenv
+from datetime import datetime
 from werkzeug.utils import secure_filename
-from PyPDF2 import PdfReader
-import uuid
-
-# ================== INIT ==================
-load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+UPLOAD_FOLDER = "uploads"
+DB_NAME = "print_jobs.db"
+
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ================== RAZORPAY ==================
-RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
-RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+# ---------------- DB INIT ----------------
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS print_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT,
+            page_from INTEGER,
+            page_to INTEGER,
+            amount REAL,
+            status TEXT,
+            created_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-razorpay_client = razorpay.Client(
-    auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
-)
+init_db()
 
-# ================== MEMORY STORE (TEMP) ==================
-jobs = {}  # job_id -> file_path
-
-# ================== ROUTES ==================
-
-@app.route("/")
-def home():
-    return jsonify({
-        "message": "VPrint Backend Running",
-        "status": "OK"
-    })
-
-# ---------- PRINTER STATUS ----------
-@app.route("/printer-status")
-def printer_status():
-    return jsonify({
-        "status": "ONLINE"
-    })
-
-# ---------- UPLOAD PDF ----------
+# ---------------- UPLOAD PDF ----------------
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files.get("file")
+    page_from = request.form.get("page_from")
+    page_to = request.form.get("page_to")
+    amount = request.form.get("amount")
 
-    file = request.files["file"]
+    if not file:
+        return jsonify({"error": "No file"}), 400
+
     filename = secure_filename(file.filename)
-
-    job_id = str(uuid.uuid4())
-    save_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{filename}")
+    save_path = os.path.join(UPLOAD_FOLDER, filename)
     file.save(save_path)
 
-    jobs[job_id] = save_path
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO print_jobs
+        (filename, page_from, page_to, amount, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        filename,
+        page_from,
+        page_to,
+        amount,
+        "PENDING",
+        datetime.now().isoformat()
+    ))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"message": "Uploaded & job created"}), 200
+
+# ---------------- GET PENDING JOB ----------------
+@app.route("/print-jobs", methods=["GET"])
+def get_print_jobs():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, filename, page_from, page_to
+        FROM print_jobs
+        WHERE status='PENDING'
+        ORDER BY id ASC
+        LIMIT 1
+    """)
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return jsonify({"message": "No jobs"}), 200
 
     return jsonify({
-        "job_id": job_id
+        "job_id": row[0],
+        "filename": row[1],
+        "page_from": row[2],
+        "page_to": row[3],
+        "file_url": f"/download/{row[1]}"
     })
 
-# ---------- GET PAGE COUNT ----------
-@app.route("/get-pages", methods=["POST"])
-def get_pages():
-    data = request.json
-    job_id = data.get("job_id")
+# ---------------- DOWNLOAD PDF ----------------
+@app.route("/download/<filename>")
+def download_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
-    if job_id not in jobs:
-        return jsonify({"error": "Invalid job_id"}), 400
+# ---------------- UPDATE STATUS ----------------
+@app.route("/update-status", methods=["POST"])
+def update_status():
+    job_id = request.json.get("job_id")
+    status = request.json.get("status")
 
-    reader = PdfReader(jobs[job_id])
-    total_pages = len(reader.pages)
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        UPDATE print_jobs SET status=? WHERE id=?
+    """, (status, job_id))
+    conn.commit()
+    conn.close()
 
-    return jsonify({
-        "total_pages": total_pages
-    })
+    return jsonify({"message": "Status updated"})
 
-# ---------- CREATE RAZORPAY ORDER ----------
-@app.route("/create-order", methods=["POST"])
-def create_order():
-    data = request.json
-    amount = int(data["amount"]) * 100  # rupees → paise
-
-    order = razorpay_client.order.create({
-        "amount": amount,
-        "currency": "INR",
-        "payment_capture": 1
-    })
-
-    return jsonify({
-        "order_id": order["id"],
-        "key_id": RAZORPAY_KEY_ID
-    })
-
-# ---------- PRINT JOB ----------
-@app.route("/print", methods=["POST"])
-def print_job():
-    data = request.json
-
-    job_id = data.get("job_id")
-    from_page = data.get("from")
-    to_page = data.get("to")
-    copies = data.get("copies")
-
-    if job_id not in jobs:
-        return jsonify({"error": "Invalid job_id"}), 400
-
-    # (Printer agent will pick this later)
-    print("🖨 PRINT JOB RECEIVED")
-    print("Job:", job_id)
-    print("Pages:", from_page, "to", to_page)
-    print("Copies:", copies)
-
-    return jsonify({
-        "status": "QUEUED"
-    })
-
-# ================== START SERVER ==================
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
