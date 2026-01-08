@@ -1,6 +1,4 @@
 flask
 flask-cors
-razorpay
-python-dotenv
-PyPDF2
+werkzeug
 gunicorn
